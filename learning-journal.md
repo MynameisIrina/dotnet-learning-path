@@ -4,3 +4,14 @@
 
 # N+1 проблема:
 Вознкиает например во время lazy loading  (чтобы включить его надо на references and collections добавить virtual и добавить .UseLazyLoadingProxies() в OnConfiguring()). Когда мы лоудим из базы данных entities и нам надо из них получить reference или collection мы проходимя с помощью foreach по ним и каждый раз запрашиваем reference или collection. Таким образом EF Core создает N sql запросов и +1 изначальный запрос в базу данных. Identity Map  не является решением N+1 проблемы потому что в случае если каждый объект имеет уникальный primary key Identity Map не поможет. Придется загружать N+1 разю
+
+# .Include(), .Select(), .AsSplitQuery()
+
+IncludeКогда загружаешь связанные объекты без коллекций (один-к-одному), или коллекции маленькие и данных немного
+Select projection Когда нужна часть данных — для списков, таблиц на UI, любых read-only endpoints
+AsSplitQueryКогда нужны все данные включая большие коллекции, и cartesian explosion реальная проблема
+
+# IQueryable vs IEnumerable
+
+IQueryable — это описание запроса. SQL не выполняется пока ты не вызовешь ToList(), FirstOrDefault(), Count() и т.д. Каждый .Where(), .OrderBy(), .Select() просто добавляет к описанию.
+IEnumerable — данные уже в памяти. Любой .Where() после этого — это C# цикл по объектам в памяти, не SQL.
