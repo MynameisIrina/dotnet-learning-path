@@ -165,4 +165,24 @@ PostgreSQL использует WAL:
 
 - читает WAL  
 - восстанавливает данные  
-- возвращает базу в консистентное состояние  
+- возвращает базу в консистентное состояние
+
+
+# Pessimistic Concruccency
+Когда нужно lock какую-то операцию
+await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.ReadCommitted);
+
+var stocks = await db.Stocks.FromSqlRaw(@"SELECT * FROM ""Stocks"" WHERE ""ProductName"" = {0} ON UPDATE", productName).FirstOrDefaultAsync();
+...
+
+await db.SaveChangesAsync();
+
+await transaction.CommitAsync();
+
+## Unit тесты — ключевые моменты
+
+- Всегда async Task, никогда void
+- Структура AAA: Arrange → Act → Assert
+- Moq: Setup настраивает поведение, Verify проверяет что метод был вызван
+- throw без аргумента сохраняет stack trace, throw ex — теряет
+- Setup всегда в Arrange, до Act
