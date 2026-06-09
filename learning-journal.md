@@ -240,11 +240,27 @@ Producer не знает КТО получит (это знает Exchange че�
 Зачем: основная queue не блокируется, сообщения не теряются
 
 **Retry flow:**
-1. Consumer упал → nack с requeue:false
-2. Сообщение → retry queue с задержкой
+1. Consumer упал → ack + вручную отправил в warehouse.retry (Отправляем ack — говорим RabbitMQ "я взял сообщение, удали его из warehouse" и вручную публикуем то же сообщение в warehouse.retry)
+2. Сообщение → retry queue с задержкой (retry queue это комната ожидания где никто не читает. TTL это таймер — истёк, вернулся в основную queue.)
 3. После задержки → обратно в основную queue
 4. После N попыток → DLQ
 
 **Exponential backoff:** 5с → 30с → 5мин → DLQ
 Зачем: даёт время системе восстановиться,
 не добавляет нагрузку на уже перегруженную систему
+
+## RabbitMQ в коде
+
+**Producer:**
+- Persistent = true → сообщение на диске, переживёт перезапуск (похожая идея как и в Write Ahead Log)
+- MessageId = Guid → уникальный идентификатор для идемпотентности (чтобы если сообщение отправилось два раза то получатель сравнин messageId обработал сообщение один раз а не два)
+
+**Consumer:**
+- autoAck: false → всегда, управляем ack вручную
+- BasicAckAsync → сообщение обработано, удалить из queue
+- BasicNackAsync(requeue: false) → не возвращать в queue, идёт в DLQ
+
+**DLQ flow:**
+Consumer упал → nack requeue:false → 
+RabbitMQ считает попытки через x-death →
+После x-max-delivery-count → сообщение в DLQ
