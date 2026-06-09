@@ -233,3 +233,18 @@ Producer отправляет в Exchange, не в Queue.
 Producer знает ЧТО произошло (routing key).
 Producer не знает КТО получит (это знает Exchange через bindings).
 Новый consumer = новый binding. Producer не меняется.
+
+## Dead Letter Queue + Retry Policy
+
+**DLQ:** queue для сообщений которые не удалось обработать после N попыток
+Зачем: основная queue не блокируется, сообщения не теряются
+
+**Retry flow:**
+1. Consumer упал → nack с requeue:false
+2. Сообщение → retry queue с задержкой
+3. После задержки → обратно в основную queue
+4. После N попыток → DLQ
+
+**Exponential backoff:** 5с → 30с → 5мин → DLQ
+Зачем: даёт время системе восстановиться,
+не добавляет нагрузку на уже перегруженную систему
