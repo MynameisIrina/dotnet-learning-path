@@ -171,16 +171,43 @@ PostgreSQL использует WAL:
 - возвращает базу в консистентное состояние
 
 
-# Pessimistic Concruccency
-Когда нужно lock какую-то операцию
-await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.ReadCommitted);
+## Pessimistic Locking (`FOR UPDATE`)
 
-var stocks = await db.Stocks.FromSqlRaw(@"SELECT * FROM ""Stocks"" WHERE ""ProductName"" = {0} ON UPDATE", productName).FirstOrDefaultAsync();
-...
+Используется, когда нужно гарантировать, что запись не будет изменена другой транзакцией, пока выполняется текущая операция.
+
+Типичный сценарий — изменение остатков на складе, обработка платежей, бронирование мест и любые операции, где важно избежать состояния гонки (*race condition*).
+
+```csharp
+await using var transaction =
+    await db.Database.BeginTransactionAsync(IsolationLevel.ReadCommitted);
+
+var stock = await db.Stocks
+    .FromSqlRaw(
+        @"SELECT *
+          FROM ""Stocks""
+          WHERE ""ProductName"" = {0}
+          FOR UPDATE",
+        productName)
+    .FirstOrDefaultAsync();
+
+if (stock is null)
+    throw new Exception("Product not found");
+
+// Изменяем данные
+stock.Quantity -= amount;
 
 await db.SaveChangesAsync();
-
 await transaction.CommitAsync();
+```
+
+### Как это работает
+
+1. Начинается транзакция.
+2. Выполняется `SELECT ... FOR UPDATE`, который устанавливает эксклюзивную блокировку на выбранную строку.
+3. Пока транзакция не завершится (`Commit` или `Rollback`), другие транзакции не смогут изменить или также заблокировать эту запись через `FOR UPDATE`.
+4. После `Commit` блокировка снимается.
+
+> `FOR UPDATE` — это механизм **pessimistic locking**. Он полезен, когда конфликтующие изменения происходят часто и нужно гарантировать последовательное выполнение операций.
 
 ## Unit тесты — ключевые моменты
 
@@ -211,31 +238,124 @@ SKIP LOCKED - другие инстансы пропускают заблоке�
 Результат: параллельная обработка без дублирования.
 
 # Integration tests
-В тестах всегда используй AsNoTracking() когда проверяешь
-данные которые мог изменить другой DbContext.
 
-## RabbitMQ - типы Exchange
+### Почему в integration tests нужен AsNoTracking()
 
-**Direct** — точное совпадение routing key
-Когда: один producer → один конкретный consumer
+EF Core кэширует сущности в ChangeTracker внутри DbContext. Из-за этого можно получить неактуальные или закэшированные данные при повторных чтениях.
 
-**Fanout** — всем привязанным queues
-Когда: одно событие должны получить все (broadcast)
+`AsNoTracking()` отключает tracking и заставляет EF всегда читать актуальное состояние из базы данных.
 
-**Topic** — маски (* = одно слово, # = любое количество слов)
-Когда: гибкая маршрутизация; каждый consumer подписывается только на то что ему нужно через свой binding. Producer отправляет одно сообщение — каждый получает только своё.
-* Warehouse сервис хочет знать только про order.* — создан заказ, отменён заказ
-* Analytics сервис хочет знать про всё — #
-* Notifications сервис хочет знать только про order.created — чтобы отправить email
+Это особенно важно в integration tests, где:
+- изменения делаются через один DbContext
+- проверка выполняется через другой DbContext
+- нужно гарантировать реальное состояние БД, а не кеш EF
 
-**Headers** — по заголовкам сообщения
-Когда: почти никогда
-Иначе читаешь из Identity Map а не из реальной БД.
+# RabbitMQ
 
-Producer отправляет в Exchange, не в Queue.
-Producer знает ЧТО произошло (routing key).
-Producer не знает КТО получит (это знает Exchange через bindings).
-Новый consumer = новый binding. Producer не меняется.
+## 📮 Exchange (сортировщик)
+
+Exchange — это входная точка и маршрутизатор сообщений.
+
+Получает:
+
+order.created
+
+И смотрит правила:
+
+---
+
+## 🔗 Bindings (правила подписки)
+
+| Queue            | правило         |
+|-----------------|----------------|
+| warehouse-queue | order.*        |
+| email-queue     | order.created  |
+| analytics-queue | #              |
+
+---
+
+## 📦 Что делает Exchange
+
+Он говорит:
+
+“это подходит этим очередям → отправляю туда”
+
+И раздаёт:
+
+order.created → warehouse-queue  
+order.created → email-queue  
+order.created → analytics-queue  
+
+---
+
+## 📬 Queue (очередь)
+
+Queue — это очередь хранения сообщений.
+
+Теперь у каждого сервиса есть своя очередь:
+
+### warehouse-queue
+[order.created]
+
+### email-queue
+[order.created]
+
+### analytics-queue
+[order.created]
+
+---
+
+## 🔷 Типы Exchange
+
+### Direct
+- точное совпадение routing key
+
+Когда:
+- один producer → один конкретный consumer
+
+---
+
+### Fanout
+- всем привязанным queues
+
+Когда:
+- broadcast (одно событие получают все)
+
+---
+
+### Topic
+- маски: * - одно слово, # - любое количество слов
+
+Когда:
+- гибкая маршрутизация
+- каждый consumer подписывается только на нужные события через binding
+
+---
+
+Примеры:
+
+- Warehouse сервис: order.* (создан заказ, отменён заказ)
+- Analytics сервис: # (всё)
+- Notifications сервис: order.created (только создание заказа → email)
+
+---
+
+### Headers
+- маршрутизация по заголовкам сообщения
+
+Когда:
+- почти никогда
+
+---
+
+## 🔷 Важные принципы
+
+- Producer отправляет сообщение в Exchange, а не в Queue
+- Producer знает ЧТО произошло (routing key)
+- Producer НЕ знает КТО получит сообщение
+- Exchange решает маршрутизацию через bindings
+- Новый consumer = новый binding
+- Producer не нужно менять при добавлении новых consumers
 
 ## Dead Letter Queue + Retry Policy
 
